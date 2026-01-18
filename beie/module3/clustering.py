@@ -44,7 +44,7 @@ class ClusteringPipeline:
                     post_id=post.post_id,
                     cluster_id=int(label),
                     embedding=post.embedding,
-                    clean_text=post.clean_text,
+                    clean_text=self._get_clean_text(post),
                     metadata=post.metadata,
                 )
             )
@@ -72,3 +72,12 @@ class ClusteringPipeline:
             )
         
         return clusters
+    
+    @staticmethod
+    def _get_clean_text(post: Any) -> str:
+        # Prefer Module 2's real field name first
+        for attr in ("cleaned_content", "clean_text", "content", "text"):
+            val = getattr(post, attr, None)
+            if isinstance(val, str):
+                return val
+        return ""
