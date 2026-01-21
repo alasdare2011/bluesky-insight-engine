@@ -1,10 +1,46 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List
+from typing import Iterable, List
 import hashlib
 
 import numpy as np
+
+class SentenceTransformerEmbedder:
+    """
+    Semantic sentence embedder using sentence-transformers.
+
+    Produces dense vector embeddings suitable for clustering and similarity.
+    """
+    def __init__(
+        self,
+        model_name: str = "all-MiniLM-L6-v2",
+        normalize: bool = True,
+     ):
+        from sentence_transformers import SentenceTransformer
+
+        self.model_name = model_name
+        self.normalize = normalize
+        self._model = SentenceTransformer(model_name)
+    
+    def embed(self, texts: Iterable[str]) -> List[np.ndarray]:
+        # Convert iterable to list to allow multiple passes
+        texts = list(texts)
+
+        if not texts:
+            return []
+        
+        embeddings = self._model.encode(
+            texts,
+            convert_to_numpy=True,
+            normalize_embeddings=self.normalize,
+            show_progress_bar=False,
+        )
+
+        return [embeddings[i] for i in range(len(embeddings))]
+        
+
+
 
 @dataclass(frozen=True)
 class SimpleHashEmbedder:
