@@ -53,7 +53,7 @@ from beie.ingestion.devStore import DevStore
 
 from beie.module2.pipeline import EmbeddingPipeline
 from beie.module2.preprocessing import PostPreprocessor, PreprocessConfig
-from beie.module2.embedding import SimpleHashEmbedder
+from beie.module2.embedding import SimpleHashEmbedder, SentenceTransformerEmbedder
 
 from beie.module3.clustering import ClusteringPipeline
 from beie.module3.strategies import KMeansClustering
@@ -77,31 +77,80 @@ STOPWORDS = {
     "is","are","was","were","be","been","being","it","this","that","these","those","i","you",
     "we","they","he","she","them","his","her","their","our","my","your","me","us","not","no",
     "so","if","then","than","too","very","just","do","does","did","have","has","had", "new",
-    "year","now","will","one","much","can","yes","really","live"
+    "year","now","will","one","much","can","yes","really","live", "happy","thank","thanks",
+    "ok","yeah","yes","really","much","appreciated", "bluesky", "bsky", "today", "people",
 }
+
+def cosine_sim(a: np.ndarray, b: np.ndarray) -> float:
+    a = np.asarray(a, dtype=float)
+    b = np.asarray(b, dtype=float)
+    denom = (np.linalg.norm(a) * np.linalg.norm(b))
+    if denom == 0:
+        return 0.0
+    return float(np.dot(a, b) / denom)
+
+def top_representatives(cluster_id: int, clustered_posts: list, clusters_by_id: dict, n: int = 3, min_chars: int = 80):
+    centroid = clusters_by_id[cluster_id].centroid
+    members = [cp for cp in clustered_posts if cp.cluster_id == cluster_id]
+
+    # Prefer informative posts
+    informative = [cp for cp in members if len(cp.clean_text) >= min_chars]
+    if len(informative) >= n:
+        members = informative  # only use informative if enough exist
+
+    scored = [(cosine_sim(cp.embedding, centroid), cp) for cp in members]
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return [cp for _, cp in scored[:n]]
+
 
 def top_terms(texts: list[str], k: int = 6) -> list[str]:
     tokens = []
-    for t in texts:
-        t = t.lower()
-        t = re.sub(r"http\S+", " ", t)          # strip urls
-        t = re.sub(r"[^a-z0-9\s#@]", " ", t)    # keep hashtags/mentions-ish
-        words = [w for w in t.split() if len(w) >= 3 and w not in STOPWORDS]
-        tokens.extend(words)
+
+    for text in texts:
+        # 1) normalize full text
+        text = text.lower()
+        text = re.sub(r"http\S+", " ", text)        # strip URLs
+        text = re.sub(r"[^a-z0-9\s]", " ", text)    # keep alphanum only
+
+        # 2) tokenize
+        for t in text.split():
+            # 3) token-level filters
+            if len(t) < 3:
+                continue
+            if "@" in t:
+                continue
+            if t == "com" or t.endswith(("com", "org", "net")):
+                continue
+            if t.isdigit():
+                continue
+            if t in STOPWORDS:
+                continue
+
+            tokens.append(t)
+
     return [w for w, _ in Counter(tokens).most_common(k)]
 
 
+
 def pick_k(n_posts: int, override: int | None = None) -> int:
-    """
-    Choose number of clusters for KMeans.
-    - If override is provided, use it (must be > 0)
-    - Else use a sqrt heuristic clamped to a sensible range
-    """
     if override is not None:
         if override <= 0:
             raise ValueError("--k must be a positive integer.")
+        if override > n_posts:
+            raise ValueError("--k cannot exceed number of posts.")
         return override
-    return int(np.clip(np.sqrt(n_posts), 8, 60))
+
+    if n_posts <= 2:
+        return 1
+
+    # sqrt heuristic
+    k = int(np.sqrt(n_posts))
+
+    # sensible bounds that depend on n_posts
+    k = max(2, k)
+    k = min(k, max(2, n_posts // 2))   # avoid lots of singletons
+    return k
+
 
 
 def get_access_jwt(pds: str, identifier: str, password: str) -> str:
@@ -177,6 +226,19 @@ def main() -> int:
         default="clustered_posts.jsonl",
         help="Output JSONL file for ClusteredPost records.",
     )
+    parser.add_argument(
+        "--embedder",
+        choices=["hash", "st"],
+        default="hash",
+        help="Embedding backend: 'hash' (fast, toy) or 'st' (sentence-transformers).",
+    )
+    parser.add_argument(
+        "--st-model",
+        type=str,
+        default="all-MiniLM-L6-v2",
+        help="Sentence-transformers model name (used when --embedder st).",
+    )
+
 
     args = parser.parse_args()
 
@@ -239,6 +301,7 @@ def main() -> int:
 
     # Quick summary: top clusters by size
     clusters_sorted = sorted(clusters, key=lambda c: c.size, reverse=True)
+    clusters_by_id = {c.cluster_id: c for c in clusters}
     print("[module3] top clusters:")
     for c in clusters_sorted[:10]:
         print(f"  - cluster_id={c.cluster_id} size={c.size} sample_posts={c.member_post_ids[:3]}")
@@ -248,12 +311,22 @@ def main() -> int:
     for cp in clustered_posts:
         posts_by_cluster.setdefault(cp.cluster_id, []).append(cp.clean_text)
     
-    print("\n[module3] representative posts per cluster:")
-    for c in clusters_sorted[:8]:
-        texts = posts_by_cluster.get(c.cluster_id, [])
+    print("\n[module3] representative posts per cluster (centroid-nearest):")
+    for c in clusters_sorted[:9]:
+        reps = top_representatives(c.cluster_id, clustered_posts, clusters_by_id, n=3)
+
+        # 🔹 ADD THESE TWO LINES HERE
+        texts_for_label = [cp.clean_text for cp in reps]
+        terms = top_terms(texts_for_label, k=6)
+        if not terms:
+            terms = ["(no_terms)"]
+
         print(f"\ncluster_id={c.cluster_id} size={c.size}")
-        for t in texts[:3]:
-            print(f"  - {t[:240]}")
+        for cp in reps:
+            print(f"  - {cp.clean_text[:240]}")
+
+        # 🔹 AND PRINT THE LABEL RIGHT AFTER
+        print(f"  label={' / '.join(terms)}")
 
     print("\n[module3] cluster labels (top terms):")
     for c in clusters_sorted[:10]:
