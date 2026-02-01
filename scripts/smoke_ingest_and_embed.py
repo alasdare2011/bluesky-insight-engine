@@ -131,28 +131,6 @@ def top_terms(texts: list[str], k: int = 6) -> list[str]:
     return [w for w, _ in Counter(tokens).most_common(k)]
 
 
-
-def pick_k(n_posts: int, override: int | None = None) -> int:
-    if override is not None:
-        if override <= 0:
-            raise ValueError("--k must be a positive integer.")
-        if override > n_posts:
-            raise ValueError("--k cannot exceed number of posts.")
-        return override
-
-    if n_posts <= 2:
-        return 1
-
-    # sqrt heuristic
-    k = int(np.sqrt(n_posts))
-
-    # sensible bounds that depend on n_posts
-    k = max(2, k)
-    k = min(k, max(2, n_posts // 2))   # avoid lots of singletons
-    return k
-
-
-
 def get_access_jwt(pds: str, identifier: str, password: str) -> str:
     """Login to Bluesky PDS and return an access JWT for Bearer auth."""
     resp = httpx.post(
@@ -202,6 +180,64 @@ def build_fetcher(store: DevStore, rate_limit: int, languages: Optional[List[str
         filters=filters,
     )
 
+def choose_k_by_silhouette(
+    embeddings: np.ndarray,
+    k_min: int,
+    k_max: int,
+    random_state: int = 42,
+) -> tuple[int, dict[int, float]]:
+    """
+    Choose k that maximizes silhouette score.
+
+    Returns:
+      (best_k, scores_by_k)
+
+    Notes:
+      - silhouette is only defined for k >= 2 and k < n_samples
+      - if we can't compute it safely, we fall back to k_min
+    """
+    from sklearn.metrics import silhouette_score
+
+    X = np.asarray(embeddings)
+    n = X.shape[0]
+
+    scores: dict[int, float] = {}
+
+    if n < 3:
+        # Not enough points to do meaningful silhouette selection
+        return max(2, min(k_min, n - 1)), scores
+
+    # Clamp k range to valid values: 2 <= k <= n-1
+    k_min = max(2, k_min)
+    k_max = min(k_max, n - 1)
+
+    if k_min > k_max:
+        return k_max, scores  # best we can do
+
+    best_k = k_min
+    best_score = float("-inf")
+
+    for k in range(k_min, k_max + 1):
+        strat = KMeansClustering(n_clusters=k, random_state=random_state)
+        strat.fit(X)
+        labels = strat.predict(X)
+
+        # If clustering degenerates (all one label), silhouette breaks
+        if len(set(labels.tolist())) < 2:
+            continue
+
+        s = float(silhouette_score(X, labels))
+        scores[k] = s
+
+        if s > best_score:
+            best_score = s
+            best_k = k
+
+    # If we never got a usable score, fall back
+    if not scores:
+        best_k = k_min
+
+    return best_k, scores
 
 def main() -> int:
     parser = argparse.ArgumentParser()
@@ -218,7 +254,6 @@ def main() -> int:
     parser.add_argument("--no-normalize", action="store_true", help="Disable L2 normalization in embeddings.")
 
     # ---- Module 3 args ----
-    parser.add_argument("--k", type=int, default=None, help="Number of clusters for KMeans (overrides heuristic).")
     parser.add_argument("--clusters-out", type=str, default="clusters.jsonl", help="Output JSONL file for Cluster records.")
     parser.add_argument(
         "--clustered-posts-out",
@@ -238,6 +273,14 @@ def main() -> int:
         default="all-MiniLM-L6-v2",
         help="Sentence-transformers model name (used when --embedder st).",
     )
+    parser.add_argument(
+    "--k",
+    type=str,
+    default="auto",
+    help="KMeans clusters: integer like 9, or 'auto' to choose by silhouette score.",
+    )
+    parser.add_argument("--k-min", type=int, default=3, help="Min k when --k auto.")
+    parser.add_argument("--k-max", type=int, default=15, help="Max k when --k auto.")
 
 
     args = parser.parse_args()
@@ -279,7 +322,16 @@ def main() -> int:
         min_chars=args.min_chars,
     )
     preprocessor = PostPreprocessor(pre_cfg)
-    embedder = SimpleHashEmbedder(dim=args.dim, normalize=not args.no_normalize)
+    if args.embedder == "st":
+        embedder = SentenceTransformerEmbedder(
+            model_name=args.st_model,
+            normalize=not args.no_normalize,
+        )
+    else:
+        embedder = SimpleHashEmbedder(
+            dim=args.dim,
+            normalize=not args.no_normalize,
+        )
 
     pipeline = EmbeddingPipeline(preprocessor=preprocessor, embedder=embedder)
 
@@ -289,13 +341,42 @@ def main() -> int:
     print(f"[module2] embedded={len(embedded_posts)} (raw_fetched={len(all_raw_posts)})")
 
     # ---- Module 3: Cluster ----
-    k = pick_k(len(embedded_posts), args.k)
+    embeddings = np.vstack([p.embedding for p in embedded_posts])
+    n_posts = embeddings.shape[0]
+
+    if args.k.strip().lower() == "auto":
+        best_k, scores = choose_k_by_silhouette(
+            embeddings,
+            k_min=args.k_min,
+            k_max=args.k_max,
+            random_state=42,
+        )
+
+        if scores:
+            print("\n[module3] silhouette scores:")
+            for kk in sorted(scores):
+                print(f"  k={kk:<2} score={scores[kk]:.4f}")
+        else:
+            print("\n[module3] silhouette: no usable scores")
+
+        k = best_k
+    else:
+        try:
+            k = int(args.k)
+        except ValueError:
+            raise SystemExit("--k must be an integer like 9, or 'auto'.")
+
+        if k < 1:
+            raise SystemExit("--k must be >= 1.")
+        if k > n_posts:
+            raise SystemExit("--k cannot exceed number of posts.")
+
     print(f"\n[module3] clustering embedded posts with KMeans (k={k})...")
 
     strategy = KMeansClustering(n_clusters=k, random_state=42)
     cluster_pipeline = ClusteringPipeline(strategy=strategy)
-
     clustered_posts, clusters = cluster_pipeline.run(embedded_posts)
+
 
     print(f"[module3] clustered_posts={len(clustered_posts)} clusters={len(clusters)}")
 
@@ -313,19 +394,43 @@ def main() -> int:
     
     print("\n[module3] representative posts per cluster (centroid-nearest):")
     for c in clusters_sorted[:9]:
-        reps = top_representatives(c.cluster_id, clustered_posts, clusters_by_id, n=3)
+        # 1) Get more candidates than we print
+        rep_candidates = top_representatives(
+            c.cluster_id,
+            clustered_posts,
+            clusters_by_id,
+            n=10,              # ← more candidates for labeling
+        )
 
-        # 🔹 ADD THESE TWO LINES HERE
-        texts_for_label = [cp.clean_text for cp in reps]
+        # 2) Decide which texts are usable for labels
+        def label_worthy(text: str) -> bool:
+            if len(text) < 40:
+                return False
+            # crude ASCII filter (fixes Japanese-only reps)
+            ascii_ratio = sum(1 for ch in text if ord(ch) < 128) / max(1, len(text))
+            if ascii_ratio < 0.85:
+                return False
+            return True
+
+        label_reps = [cp for cp in rep_candidates if label_worthy(cp.clean_text)]
+
+        # 3) Build label from best available reps
+        texts_for_label = [cp.clean_text for cp in label_reps[:3]]
         terms = top_terms(texts_for_label, k=6)
+
+        # 4) Fallback: whole-cluster label if reps fail
+        if not terms:
+            terms = top_terms(posts_by_cluster.get(c.cluster_id, []), k=6)
         if not terms:
             terms = ["(no_terms)"]
 
+        # 5) Print (still only show 3 reps)
+        reps_to_print = rep_candidates[:3]
+
         print(f"\ncluster_id={c.cluster_id} size={c.size}")
-        for cp in reps:
+        for cp in reps_to_print:
             print(f"  - {cp.clean_text[:240]}")
 
-        # 🔹 AND PRINT THE LABEL RIGHT AFTER
         print(f"  label={' / '.join(terms)}")
 
     print("\n[module3] cluster labels (top terms):")
