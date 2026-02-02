@@ -79,6 +79,17 @@ STOPWORDS = {
     "so","if","then","than","too","very","just","do","does","did","have","has","had", "new",
     "year","now","will","one","much","can","yes","really","live", "happy","thank","thanks",
     "ok","yeah","yes","really","much","appreciated", "bluesky", "bsky", "today", "people",
+    "there","more","what","when","who","why","how","also","too",
+}
+
+NAME_STOPWORDS = {
+    "kitty","jane","helen","misty","eric","cindy","jo","ann","sharon","beccy","skylark",
+    "lauren","marshall","michelle","mark", "erin", "roberta", "ceri",
+}
+
+GREETINGS = {
+    "happy","year","new","hello","hi","hey","thanks","thank","welcome","appreciate",
+    "fantastic","great","nice","ok","yeah","yes"
 }
 
 def cosine_sim(a: np.ndarray, b: np.ndarray) -> float:
@@ -119,11 +130,11 @@ def top_terms(texts: list[str], k: int = 6) -> list[str]:
                 continue
             if "@" in t:
                 continue
-            if t == "com" or t.endswith(("com", "org", "net")):
+            if t == "com" or t.endswith((".com", ".org", ".net")):
                 continue
             if t.isdigit():
                 continue
-            if t in STOPWORDS:
+            if t in STOPWORDS or t in NAME_STOPWORDS or t in GREETINGS:
                 continue
 
             tokens.append(t)
@@ -416,13 +427,14 @@ def main() -> int:
 
         # 3) Build label from best available reps
         texts_for_label = [cp.clean_text for cp in label_reps[:3]]
-        terms = top_terms(texts_for_label, k=6)
-
-        # 4) Fallback: whole-cluster label if reps fail
-        if not terms:
-            terms = top_terms(posts_by_cluster.get(c.cluster_id, []), k=6)
-        if not terms:
-            terms = ["(no_terms)"]
+        # If our reps are mostly tiny / greeting-like, don't label this cluster.
+        total_chars = sum(len(t) for t in texts_for_label)
+        if total_chars < 250:  # tune: 200–400
+            terms = ["(greetings)"]
+        else:
+            terms = top_terms(texts_for_label, k=6)
+            if not terms:
+                terms = ["(no_terms)"]
 
         # 5) Print (still only show 3 reps)
         reps_to_print = rep_candidates[:3]
@@ -435,8 +447,19 @@ def main() -> int:
 
     print("\n[module3] cluster labels (top terms):")
     for c in clusters_sorted[:10]:
-        terms = top_terms(posts_by_cluster.get(c.cluster_id, []), k=6)
+        reps = top_representatives(c.cluster_id, clustered_posts, clusters_by_id, n=3)
+        texts_for_label = [cp.clean_text for cp in reps]
+        total_chars = sum(len(t) for t in texts_for_label)
+
+        if total_chars < 250:
+            terms = ["(greetings)"]
+        else:
+            terms = top_terms(texts_for_label, k=6)
+            if not terms:
+                terms = ["(no_terms)"]
+
         print(f"  - cluster_id={c.cluster_id} size={c.size} label={' / '.join(terms)}")
+
 
     # ---- Write EmbeddedPosts output ----
     out_path = args.out
