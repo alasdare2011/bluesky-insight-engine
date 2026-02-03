@@ -57,6 +57,7 @@ from beie.module2.embedding import SimpleHashEmbedder, SentenceTransformerEmbedd
 
 from beie.module3.clustering import ClusteringPipeline
 from beie.module3.strategies import KMeansClustering
+from beie.module3.evaluation import choose_k_by_silhouette
 
 def json_safe(obj):
     """Recursively convert dataclasses/datetimes/numpy into JSON-serializable values."""
@@ -191,64 +192,6 @@ def build_fetcher(store: DevStore, rate_limit: int, languages: Optional[List[str
         filters=filters,
     )
 
-def choose_k_by_silhouette(
-    embeddings: np.ndarray,
-    k_min: int,
-    k_max: int,
-    random_state: int = 42,
-) -> tuple[int, dict[int, float]]:
-    """
-    Choose k that maximizes silhouette score.
-
-    Returns:
-      (best_k, scores_by_k)
-
-    Notes:
-      - silhouette is only defined for k >= 2 and k < n_samples
-      - if we can't compute it safely, we fall back to k_min
-    """
-    from sklearn.metrics import silhouette_score
-
-    X = np.asarray(embeddings)
-    n = X.shape[0]
-
-    scores: dict[int, float] = {}
-
-    if n < 3:
-        # Not enough points to do meaningful silhouette selection
-        return max(2, min(k_min, n - 1)), scores
-
-    # Clamp k range to valid values: 2 <= k <= n-1
-    k_min = max(2, k_min)
-    k_max = min(k_max, n - 1)
-
-    if k_min > k_max:
-        return k_max, scores  # best we can do
-
-    best_k = k_min
-    best_score = float("-inf")
-
-    for k in range(k_min, k_max + 1):
-        strat = KMeansClustering(n_clusters=k, random_state=random_state)
-        strat.fit(X)
-        labels = strat.predict(X)
-
-        # If clustering degenerates (all one label), silhouette breaks
-        if len(set(labels.tolist())) < 2:
-            continue
-
-        s = float(silhouette_score(X, labels))
-        scores[k] = s
-
-        if s > best_score:
-            best_score = s
-            best_k = k
-
-    # If we never got a usable score, fall back
-    if not scores:
-        best_k = k_min
-
-    return best_k, scores
 
 def main() -> int:
     parser = argparse.ArgumentParser()
