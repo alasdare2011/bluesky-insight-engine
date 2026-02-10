@@ -11,7 +11,8 @@ _WS_RE = re.compile(r"\s+")
 _MENTION_RE = re.compile(r"@[^\s]+")           # removes @user.bsky.social
 _NON_WORD_RE = re.compile(r"[^a-z0-9\s]+")     # strips punctuation/emojis
 
-def make_clean_tokens(text: str, cfg: PreprocessConfig) -> List[str]:
+def make_clean_tokens(text: str, cfg: "PreprocessConfig") -> List[str]:
+
         t = text.strip()
 
         if cfg.strip_urls:

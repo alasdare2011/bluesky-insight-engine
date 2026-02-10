@@ -58,6 +58,7 @@ from beie.module2.embedding import SimpleHashEmbedder, SentenceTransformerEmbedd
 from beie.module3.clustering import ClusteringPipeline
 from beie.module3.strategies import KMeansClustering
 from beie.module3.evaluation import choose_k_by_silhouette
+from beie.module3.labeling import label_reps, label_tokens
 
 def json_safe(obj):
     """Recursively convert dataclasses/datetimes/numpy into JSON-serializable values."""
@@ -72,26 +73,6 @@ def json_safe(obj):
     if isinstance(obj, list):
         return [json_safe(v) for v in obj]
     return obj
-
-STOPWORDS = {
-    "the","a","an","and","or","but","to","of","in","on","for","with","as","at","by","from",
-    "is","are","was","were","be","been","being","it","this","that","these","those","i","you",
-    "we","they","he","she","them","his","her","their","our","my","your","me","us","not","no",
-    "so","if","then","than","too","very","just","do","does","did","have","has","had", "new",
-    "year","now","will","one","much","can","yes","really","live", "happy","thank","thanks",
-    "ok","yeah","yes","really","much","appreciated", "bluesky", "bsky", "today", "people",
-    "there","more","what","when","who","why","how","also","too",
-}
-
-NAME_STOPWORDS = {
-    "kitty","jane","helen","misty","eric","cindy","jo","ann","sharon","beccy","skylark",
-    "lauren","marshall","michelle","mark", "erin", "roberta", "ceri",
-}
-
-GREETINGS = {
-    "happy","year","new","hello","hi","hey","thanks","thank","welcome","appreciate",
-    "fantastic","great","nice","ok","yeah","yes"
-}
 
 def cosine_sim(a: np.ndarray, b: np.ndarray) -> float:
     a = np.asarray(a, dtype=float)
@@ -113,35 +94,6 @@ def top_representatives(cluster_id: int, clustered_posts: list, clusters_by_id: 
     scored = [(cosine_sim(cp.embedding, centroid), cp) for cp in members]
     scored.sort(key=lambda x: x[0], reverse=True)
     return [cp for _, cp in scored[:n]]
-
-
-def top_terms(texts: list[str], k: int = 6) -> list[str]:
-    tokens = []
-
-    for text in texts:
-        # 1) normalize full text
-        text = text.lower()
-        text = re.sub(r"http\S+", " ", text)        # strip URLs
-        text = re.sub(r"[^a-z0-9\s]", " ", text)    # keep alphanum only
-
-        # 2) tokenize
-        for t in text.split():
-            # 3) token-level filters
-            if len(t) < 3:
-                continue
-            if "@" in t:
-                continue
-            if t == "com" or t.endswith((".com", ".org", ".net")):
-                continue
-            if t.isdigit():
-                continue
-            if t in STOPWORDS or t in NAME_STOPWORDS or t in GREETINGS:
-                continue
-
-            tokens.append(t)
-
-    return [w for w, _ in Counter(tokens).most_common(k)]
-
 
 def get_access_jwt(pds: str, identifier: str, password: str) -> str:
     """Login to Bluesky PDS and return an access JWT for Bearer auth."""
@@ -192,7 +144,6 @@ def build_fetcher(store: DevStore, rate_limit: int, languages: Optional[List[str
         filters=filters,
     )
 
-
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--pages", type=int, default=3, help="How many pages to fetch (cursor paging).")
@@ -201,7 +152,7 @@ def main() -> int:
     parser.add_argument("--out", type=str, default="embedded.jsonl", help="Output JSONL file for EmbeddedPost.")
     parser.add_argument("--lang", action="append", default=None,
                         help="Language filter (repeatable). Example: --lang en --lang fr")
-    parser.add_argument("--min-chars", type=int, default=5, help="Preprocessing min chars threshold.")
+    parser.add_argument("--min-tokens", type=int, default=2, help="Preprocessing min tokens threshold.")
     parser.add_argument("--no-strip-urls", action="store_true", help="Disable URL stripping in preprocessing.")
     parser.add_argument("--no-lowercase", action="store_true", help="Disable lowercasing in preprocessing.")
     parser.add_argument("--dim", type=int, default=384, help="Embedding dimension for SimpleHashEmbedder.")
@@ -273,7 +224,7 @@ def main() -> int:
     pre_cfg = PreprocessConfig(
         lowercase=not args.no_lowercase,
         strip_urls=not args.no_strip_urls,
-        min_chars=args.min_chars,
+        min_tokens=args.min_tokens,
     )
     preprocessor = PostPreprocessor(pre_cfg)
     if args.embedder == "st":
@@ -344,63 +295,23 @@ def main() -> int:
     # Build quick labels per cluster (top terms)
     posts_by_cluster = {}
     for cp in clustered_posts:
-        posts_by_cluster.setdefault(cp.cluster_id, []).append(cp.clean_text)
+        posts_by_cluster.setdefault(cp.cluster_id, []).append(cp.clean_tokens)
     
     print("\n[module3] representative posts per cluster (centroid-nearest):")
     for c in clusters_sorted[:9]:
-        # 1) Get more candidates than we print
-        rep_candidates = top_representatives(
-            c.cluster_id,
-            clustered_posts,
-            clusters_by_id,
-            n=10,              # ← more candidates for labeling
-        )
+        reps = top_representatives(c.cluster_id, clustered_posts, clusters_by_id, n=3)
 
-        # 2) Decide which texts are usable for labels
-        def label_worthy(text: str) -> bool:
-            if len(text) < 40:
-                return False
-            # crude ASCII filter (fixes Japanese-only reps)
-            ascii_ratio = sum(1 for ch in text if ord(ch) < 128) / max(1, len(text))
-            if ascii_ratio < 0.85:
-                return False
-            return True
-
-        label_reps = [cp for cp in rep_candidates if label_worthy(cp.clean_text)]
-
-        # 3) Build label from best available reps
-        texts_for_label = [cp.clean_text for cp in label_reps[:3]]
-        # If our reps are mostly tiny / greeting-like, don't label this cluster.
-        total_chars = sum(len(t) for t in texts_for_label)
-        if total_chars < 250:  # tune: 200–400
-            terms = ["(greetings)"]
-        else:
-            terms = top_terms(texts_for_label, k=6)
-            if not terms:
-                terms = ["(no_terms)"]
-
-        # 5) Print (still only show 3 reps)
-        reps_to_print = rep_candidates[:3]
+        terms = label_reps(reps, k=6)
 
         print(f"\ncluster_id={c.cluster_id} size={c.size}")
-        for cp in reps_to_print:
+        for cp in reps:
             print(f"  - {cp.clean_text[:240]}")
-
         print(f"  label={' / '.join(terms)}")
 
     print("\n[module3] cluster labels (top terms):")
     for c in clusters_sorted[:10]:
-        reps = top_representatives(c.cluster_id, clustered_posts, clusters_by_id, n=3)
-        texts_for_label = [cp.clean_text for cp in reps]
-        total_chars = sum(len(t) for t in texts_for_label)
-
-        if total_chars < 250:
-            terms = ["(greetings)"]
-        else:
-            terms = top_terms(texts_for_label, k=6)
-            if not terms:
-                terms = ["(no_terms)"]
-
+        texts = posts_by_cluster.get(c.cluster_id, [])
+        terms = label_tokens(texts, k=6)
         print(f"  - cluster_id={c.cluster_id} size={c.size} label={' / '.join(terms)}")
 
 

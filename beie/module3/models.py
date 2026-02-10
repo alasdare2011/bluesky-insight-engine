@@ -8,23 +8,26 @@ import numpy as np
 class ClusteredPost:
     """
     Output of clustering for a single post.
-    Kept intentionally small and immutable so it can be 
-    safely passed downstream
+    Kept intentionally small and immutable so it can be
+    safely passed downstream.
     """
     post_id: str
     cluster_id: int
     embedding: np.ndarray
+
     clean_text: str
+    clean_tokens: List[str]
+
     metadata: Dict[str, Any]
+
 
 @dataclass
 class Cluster:
     """
     Aggregate information about a cluster.
     Mutable is fine here (we may enrich clusters later),
-    but keep fields stable
+    but keep fields stable.
     """
-
     cluster_id: int
     size: int
     centroid: np.ndarray
