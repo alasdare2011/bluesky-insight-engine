@@ -21,18 +21,22 @@ class RawPost:
 
 
 class FakePreprocessor:
-    """Returns None when content contains 'DROP'; else lower/strip."""
+    """Returns None when content contains 'DROP'; else lower/strip and emits tokens."""
 
     def preprocess_one(self, post: RawPost) -> Optional[PreprocessedPost]:
         if "DROP" in post.content:
             return None
+
+        clean_text = post.content.lower().strip()
+        clean_tokens = clean_text.split()  # simple tokenization for test
 
         return PreprocessedPost(
             post_id=post.post_id,
             author=post.author,
             timestamp=post.timestamp,
             original_content=post.content,
-            cleaned_content=post.content.lower().strip(),
+            clean_text=clean_text,
+            clean_tokens=clean_tokens,
             content_hash=post.content_hash,
             metadata=dict(post.metadata),
         )
@@ -78,7 +82,7 @@ def test_pipeline_preserves_order_and_maps_fields():
     assert len(result) == 2
     assert all(isinstance(r, EmbeddedPost) for r in result)
 
-    # pipeline should embed cleaned_content in-order
+    # pipeline should embed clean_text in-order
     assert emb.last_texts == ["hello world", "second post"]
 
     # Check mapping
@@ -86,7 +90,8 @@ def test_pipeline_preserves_order_and_maps_fields():
     assert r0.post_id == "p1"
     assert r0.author == "alice"
     assert r0.timestamp == t0
-    assert r0.cleaned_content == "hello world"
+    assert r0.clean_text == "hello world"
+    assert r0.clean_tokens == ["hello", "world"]
     assert r0.content_hash == "h1"
     assert r0.metadata == {"lang": "en"}
 
@@ -96,7 +101,8 @@ def test_pipeline_preserves_order_and_maps_fields():
 
     r1 = result[1]
     assert r1.post_id == "p2"
-    assert r1.cleaned_content == "second post"
+    assert r1.clean_text == "second post"
+    assert r1.clean_tokens == ["second", "post"]
     assert r1.content_hash == "h2"
 
 
@@ -116,6 +122,7 @@ def test_pipeline_filters_out_none_from_preprocessor():
 
     assert [r.post_id for r in result] == ["p1", "p3"]
     assert emb.last_texts == ["keep me", "also keep"]
+    assert [r.clean_tokens for r in result] == [["keep", "me"], ["also", "keep"]]
 
 
 def test_pipeline_empty_input_returns_empty_list():
