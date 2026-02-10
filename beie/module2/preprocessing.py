@@ -1,13 +1,39 @@
 from __future__ import annotations
 import re
-from dataclasses import dataclass
-from typing import Iterable, List
+from dataclasses import dataclass, field
+from typing import Iterable, List, Set
 
 from beie.ingestion.models import RawPost
 from .models import PreprocessedPost
 
 _URL_RE = re.compile(r"https?://\S+|www\.\S+", re.IGNORECASE)
 _WS_RE = re.compile(r"\s+")
+_MENTION_RE = re.compile(r"@[^\s]+")           # removes @user.bsky.social
+_NON_WORD_RE = re.compile(r"[^a-z0-9\s]+")     # strips punctuation/emojis
+
+def make_clean_tokens(text: str, cfg: PreprocessConfig) -> List[str]:
+        t = text.strip()
+
+        if cfg.strip_urls:
+            t = _URL_RE.sub(" ", t)
+
+        if cfg.strip_mentions:
+            t = _MENTION_RE.sub(" ", t)
+
+        if cfg.lowercase:
+            t = t.lower()
+
+        if cfg.strip_non_words:
+            t = _NON_WORD_RE.sub(" ", t)
+
+        t = _WS_RE.sub(" ", t).strip()
+
+        toks = [tok for tok in t.split(" ") if tok and tok not in cfg.stopwords]
+        return toks
+
+def make_clean_text(tokens: List[str]) -> str:
+    return " ".join(tokens)
+
 
 @dataclass
 class PreprocessConfig:
@@ -30,7 +56,11 @@ class PreprocessConfig:
 
     lowercase: bool = True
     strip_urls: bool = True
-    min_chars: int = 5
+    strip_mentions: bool = True
+    strip_non_words: bool = True
+    min_tokens: int = 2
+
+    stopwords: Set[str] = field(default_factory=set)
 
 class PostPreprocessor:
     """
@@ -61,35 +91,6 @@ class PostPreprocessor:
         """
         self.config = config or PreprocessConfig()
 
-    def clean_content(self, text: str) -> str:
-        """
-        Clean and normalize raw text content.
-
-        Cleaning steps (in order):
-          1) Strip leading/trailing whitespace
-          2) Remove URLs (if enabled)
-          3) Convert to lowercase (if enabled)
-          4) Collapse repeated whitespace into single spaces
-
-        Args:
-            text:
-                Raw text content from a post.
-
-        Returns:
-            Cleaned and normalized text.
-        """
-        t = text.strip()
-
-        if self.config.strip_urls:
-            t = _URL_RE.sub("", t)
-
-        if self.config.lowercase:
-            t = t.lower()
-
-        t = _WS_RE.sub(" ", t).strip()
-
-        return t
-
     def preprocess_one(self, post: RawPost) -> PreprocessedPost | None:
         """
         Preprocess a single RawPost.
@@ -107,17 +108,20 @@ class PostPreprocessor:
             A PreprocessedPost if the post passes preprocessing filters;
             None if the post should be dropped.
         """
-        cleaned = self.clean_content(post.content)
+        tokens = make_clean_tokens(post.content, self.config)
 
-        if len(cleaned) < self.config.min_chars:
+        if len(tokens) < self.config.min_tokens:
             return None
-        
+
+        clean_text = make_clean_text(tokens)
+
         return PreprocessedPost(
             post_id=post.post_id,
             author=post.author,
             timestamp=post.timestamp,
             original_content=post.content,
-            cleaned_content=cleaned,
+            clean_text=clean_text,
+            clean_tokens=tokens,
             content_hash=post.content_hash,
             metadata=dict(post.metadata),
         )

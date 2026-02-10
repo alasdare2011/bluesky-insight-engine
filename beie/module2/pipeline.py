@@ -92,7 +92,7 @@ class EmbeddingPipeline:
         if not preprocessed:
             return []
         
-        texts = [p.cleaned_content for p in preprocessed]
+        texts = [p.clean_text for p in preprocessed]
         vectors = self.embedder.embed(texts)
 
         if len(vectors) != len(preprocessed):
@@ -107,7 +107,8 @@ class EmbeddingPipeline:
                     post_id=p.post_id,
                     author=p.author,
                     timestamp=p.timestamp,
-                    cleaned_content=p.cleaned_content,
+                    clean_text=p.clean_text,
+                    clean_tokens=list(p.clean_tokens),
                     embedding=vec.tolist(),     # np.ndarray -> List[float]
                     content_hash=p.content_hash,
                     metadata=dict(p.metadata),

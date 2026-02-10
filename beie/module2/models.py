@@ -37,7 +37,8 @@ class PreprocessedPost:
     author: str
     timestamp: datetime
     original_content: str
-    cleaned_content: str
+    clean_text: str
+    clean_tokens: List[str]
     content_hash: str
     metadata: Dict[str, Any] = field(default_factory=dict)
 
@@ -76,7 +77,8 @@ class EmbeddedPost:
     post_id: str
     author: str
     timestamp: datetime
-    cleaned_content: str
+    clean_text: str
+    clean_tokens: List[str]
     embedding: List[float]
     content_hash: str
     metadata: Dict[str, Any] = field(default_factory=dict)
